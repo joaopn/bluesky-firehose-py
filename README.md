@@ -10,6 +10,7 @@ A Python library for collecting and archiving posts from the Bluesky social netw
 - Automatic reconnection on connection loss
 - Efficient batch processing and disk operations
 - Debug mode for detailed logging
+- Optional handle resolution (disabled by default)
 
 ## Installation
 
@@ -57,9 +58,11 @@ Options:
   --password    Bluesky password (optional)
   --debug       Enable debug output
   --stream      Stream post text to stdout in real-time
+  --measure-rate Track and display posts per minute rate
+  --get-handles  Resolve handles while archiving (not recommended)
 ```
 
-Note: Authentication (username/password) is currently implemented but not required for basic operation. Future versions will use authentication to fetch additional user and post metadata.
+Note: Authentication (username/password) is currently implemented but not required for basic operation. Future versions will use authentication to fetch additional user and post metadata. In addition, handle resolution is disabled by default, because it slows down the archiving process considerably because of the rate limiting. Getting the handles through the DID after collection is recommended.
 
 ### As a Library
 
@@ -97,7 +100,25 @@ async def main():
 asyncio.run(main())
 ```
 
-Example use cases:
+3. **Run Archiving and Streaming Concurrently**:
+```python
+from archiver import BlueskyArchiver
+import asyncio
+
+async def main():
+    archiver = BlueskyArchiver(debug=True, stream=True, measure_rate=True)
+    
+    async for post in archiver.run_stream():
+        # Process each post as it arrives
+        print(f"New post from @{post['handle']}: {post['record']['text']}")
+
+        # Example: Additional processing
+        # process_post(post)
+
+asyncio.run(main())
+```
+
+### Example Use Cases:
 - Real-time content analysis
 - Custom filtering and processing
 - Integration with other services
@@ -138,7 +159,7 @@ Each JSONL file contains one post per line in JSON format with the following str
 │   └── archiver.py       # Core archiving logic
 ├── data/                 # Archived posts storage
 ├── requirements.txt      # Project dependencies
-└── README.md            # This file
+���── README.md            # This file
 ```
 
 ## License

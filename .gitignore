@@ -36,3 +36,9 @@ ENV/
 data/
 .env
 config.json 
+
+# jsonl to be sure
+*.jsonl
+
+# .ipynb used for experimentation
+*.ipynb

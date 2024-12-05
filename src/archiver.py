@@ -3,279 +3,310 @@ import asyncio
 import json
 from datetime import datetime
 import os
-from atproto import Client, models
-from typing import Dict, Optional, List
-from collections import deque
+from atproto import Client
+from typing import Dict, Optional, List, AsyncGenerator
 from asyncio import Queue
 import logging
 import aiofiles
 import sys
 
 class BlueskyArchiver:
-    def __init__(self, username: Optional[str] = None, password: Optional[str] = None, debug: bool = False, stream: bool = False):
-        """Initialize the Bluesky Archiver.
-        
-        Args:
-            username: Bluesky username (optional)
-            password: Bluesky password (optional)
-            debug: Enable debug output (default: False)
-            stream: Stream post text to stdout (default: False)
-        """
-        # Suppress HTTP request logging
+    def __init__(
+        self, 
+        username: Optional[str] = None, 
+        password: Optional[str] = None, 
+        debug: bool = False, 
+        stream: bool = False, 
+        measure_rate: bool = False,
+        get_handles: bool = False
+    ):
+        """Initialize the Bluesky Archiver."""
+        # Configure logging
         logging.getLogger('websockets').setLevel(logging.WARNING)
         logging.getLogger('urllib3').setLevel(logging.WARNING)
         logging.getLogger('httpx').setLevel(logging.WARNING)
-        
+
         self.debug = debug
+        self.stream = stream
+        self.measure_rate = measure_rate
+        self.get_handles = get_handles
+        self.post_count = 0
+        self.posts_saved = 0
+        self.start_time = None
+        self.running = True
+
+        # Initialize client
         self.client = Client()
         if username and password:
             self.client.login(username, password)
-        
+
         self.uri = "wss://jetstream2.us-east.bsky.network/subscribe"
-        self.handle_cache: Dict[str, str] = {}  # Cache DID -> handle mapping
-        self.running = True
-        
-        # Add two queues - one for incoming posts and one for disk operations
-        self.post_queue = Queue()
-        self.disk_queue = Queue()
-        self.save_task = None
-        self.disk_task = None
-        
-        if self.debug:
-            logging.basicConfig(
-                level=logging.DEBUG,
-                format='%(asctime)s - %(levelname)s - %(message)s'
-            )
-        else:
-            logging.basicConfig(
-                level=logging.WARNING,
-                format='%(asctime)s - %(levelname)s - %(message)s'
-            )
-        
-        self.stream = stream
-        
+        self.handle_cache: Dict[str, str] = {}
+        self.resolving_dids: set = set()  # Track DIDs currently being resolved
+        self.handle_semaphore = asyncio.Semaphore(10)  # Limit concurrent handle resolutions
+
+        # Initialize queues
+        self.raw_queue: Queue = Queue()  # Posts from websocket with None handles
+        self.processed_queue: Queue = Queue()  # Posts with resolved handles
+
+        # Initialize background tasks
+        self.disk_task: asyncio.Task = None
+        self.handle_task: asyncio.Task = None
+        self.websocket_task: asyncio.Task = None
+
+        # Set up logging
+        logging.basicConfig(
+            level=logging.DEBUG if self.debug else logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s'
+        )
+
     async def get_handle(self, did: str) -> Optional[str]:
-        """Get handle for a DID using repo.describe_repo.
-        
-        Args:
-            did: The DID to look up
-            
-        Returns:
-            Handle string or None if not found
-        """
+        """Retrieve handle for a given DID."""
         if did in self.handle_cache:
             return self.handle_cache[did]
-            
-        try:
-            response = self.client.com.atproto.repo.describe_repo({'repo': did})
-            handle = response.handle
-            self.handle_cache[did] = handle
-            return handle
-        except Exception as e:
-            logging.error(f"🔴 Error getting handle for {did}")
-            return None
+        # If this DID is already being resolved, wait a bit and check cache again
+        if did in self.resolving_dids:
+            await asyncio.sleep(0.1)
+            return self.handle_cache.get(did)
 
-    async def save_posts_async(self, posts: List[dict], filename: Optional[str] = None):
-        """Asynchronously save posts to JSONL files, organizing by hour.
-        
-        Args:
-            posts: List of post records to save
-            filename: Optional custom filename, otherwise organizes by hour
-        """
-        if filename:
-            # If filename is provided, save all posts to that file
-            async with aiofiles.open(filename, 'a', encoding='utf-8') as f:
-                for post in posts:
-                    await f.write(json.dumps(post, ensure_ascii=False) + '\n')
-            return
-            
-        # Group posts by hour
+        self.resolving_dids.add(did)
+        try:
+            async with self.handle_semaphore:
+                response = await asyncio.to_thread(self.client.com.atproto.repo.describe_repo, {'repo': did})
+                handle = response.handle
+                self.handle_cache[did] = handle
+                return handle
+        except Exception as e:
+            logging.error(f"🔴 Error getting handle for {did}: {e}")
+            return None
+        finally:
+            self.resolving_dids.remove(did)
+
+    async def save_posts_async(self, posts: List[dict]):
+        """Asynchronously save posts to JSONL files, organized by hour."""
+        if self.measure_rate and self.start_time is None:
+            self.start_time = datetime.now()
+
         posts_by_hour = {}
         for post in posts:
-            # Parse the timestamp from the post
-            post_time = datetime.fromisoformat(post['timestamp'])
-            
-            # Create the hour key and filename
+            post_time = datetime.fromtimestamp(post["time_us"] / 1_000_000)
             date_dir = post_time.strftime('%Y-%m/%d')
             hour_filename = post_time.strftime('posts_%Y%m%d_%H.jsonl')
             full_path = f"data/{date_dir}/{hour_filename}"
-            
-            if full_path not in posts_by_hour:
-                posts_by_hour[full_path] = []
-            posts_by_hour[full_path].append(post)
-        
-        # Save posts to their respective hour files
-        for full_path, hour_posts in posts_by_hour.items():
-            # Ensure directory exists
-            os.makedirs(os.path.dirname(full_path), exist_ok=True)
-            
-            # Append posts to the hour's file
-            async with aiofiles.open(full_path, 'a', encoding='utf-8') as f:
-                for post in hour_posts:
-                    await f.write(json.dumps(post, ensure_ascii=False) + '\n')
 
-    async def disk_worker(self):
+            posts_by_hour.setdefault(full_path, []).append(post)
+
+        for full_path, hour_posts in posts_by_hour.items():
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            async with aiofiles.open(full_path, 'a', encoding='utf-8') as f:
+                await f.write('\n'.join(json.dumps(post, ensure_ascii=False) for post in hour_posts) + '\n')
+            self.posts_saved += len(hour_posts)
+
+        if self.measure_rate:
+            self.post_count += len(posts)
+            now = datetime.now()
+            if (now - self.last_rate_check).total_seconds() >= 10 if hasattr(self, 'last_rate_check') else True:
+                elapsed_minutes = (now - self.start_time).total_seconds() / 60
+                rate = self.post_count / elapsed_minutes
+                estimated_daily = rate * 60 * 24
+                logging.info(f"Current rate: {rate:.1f} posts/minute (est. {int(estimated_daily):,} posts/day)")
+                self.last_rate_check = now
+
+    async def get_handle_and_update(self, post: dict):
+        """Get handle for a post and update post and queue when done."""
+        handle = await self.get_handle(post['did'])
+        post['handle'] = handle
+        await self.processed_queue.put([post])
+
+    async def handle_processor(self):
+        """Process posts from raw_queue, resolve handles, and put in processed_queue."""
+        while self.running:
+            try:
+                posts = await self.raw_queue.get()
+                if self.get_handles:
+                    # Process all posts in parallel
+                    tasks = []
+                    for post in posts:
+                        if post['did'] not in self.handle_cache:
+                            tasks.append(self.get_handle_and_update(post))
+                        else:
+                            # If handle is in cache, send directly to processed queue
+                            post['handle'] = self.handle_cache[post['did']]
+                            tasks.append(self.processed_queue.put([post]))
+                    
+                    # Wait for all handle resolutions and queue updates to complete
+                    if tasks:
+                        await asyncio.gather(*tasks)
+                else:
+                    # Skip handle resolution, just forward to processed queue
+                    await self.processed_queue.put(posts)
+
+                self.raw_queue.task_done()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logging.error(f"🔴 Error in handle processor: {e}")
+
+    async def disk_worker(self) -> None:
         """Background task to handle disk operations."""
         while self.running:
             try:
-                posts, filename = await asyncio.wait_for(self.disk_queue.get(), timeout=1.0)
-                await self.save_posts_async(posts, filename)
-            except asyncio.TimeoutError:
-                continue
+                posts = await self.processed_queue.get()
+                await self.save_posts_async(posts)
+                self.processed_queue.task_done()
+            except asyncio.CancelledError:
+                break
             except Exception as e:
                 logging.error(f"🔴 Error in disk worker: {e}")
 
-    async def save_worker(self):
-        """Background task to batch posts and queue them for saving."""
-        posts_batch = []
+    async def archive_websocket_listener(self):
+        """Continuously listen to the WebSocket and enqueue posts."""
         while self.running:
             try:
-                # Wait for posts with a timeout
-                post = await asyncio.wait_for(self.post_queue.get(), timeout=1.0)
-                posts_batch.append(post)
-                
-                # Check if we have more posts waiting
-                while len(posts_batch) < 100 and not self.post_queue.empty():
-                    posts_batch.append(await self.post_queue.get())
-                    
-                # Queue the batch for disk operations without waiting
-                if posts_batch:
-                    await self.disk_queue.put((posts_batch.copy(), None))
-                    posts_batch = []
-                
-            except asyncio.TimeoutError:
-                # If we have posts in the batch when timeout occurs, queue them
-                if posts_batch:
-                    await self.disk_queue.put((posts_batch.copy(), None))
-                    posts_batch = []
+                params = {"wantedCollections": ["app.bsky.feed.post"]}
+                url = f"{self.uri}?{'&'.join(f'wantedCollections={c}' for c in params['wantedCollections'])}"
+                async with websockets.connect(url) as archive_websocket:
+                    if self.debug:
+                        logging.debug("🟢 Connected to firehose for archiving")
+                    async for message in archive_websocket:
+                        if not self.running:
+                            break
+                        data = json.loads(message)
+                        if data.get("kind") != "commit":
+                            continue
+                        commit = data.get("commit", {})
+                        if commit.get("operation") != "create":
+                            continue
+
+                        did = data.get('did')
+                        post_record = {
+                            'handle': None,  # Handle will be resolved by handle_processor
+                            'record': commit.get('record'),
+                            "rkey": commit.get('rkey'),
+                            'did': did,
+                            'time_us': data.get('time_us')
+                        }
+
+                        if self.stream and 'text' in commit.get('record', {}):
+                            sys.stdout.write(f"🖊️: {commit['record']['text']}\n")
+                            sys.stdout.flush()
+
+                        await self.raw_queue.put([post_record])
+
+            except asyncio.CancelledError:
+                break  # Exit cleanly on cancellation
+            except websockets.exceptions.ConnectionClosed as e:
+                if self.running:  # Only try to reconnect if we're still running
+                    logging.warning(f"🔴 Connection closed: {e}. Reconnecting in 5 seconds...")
+                    await asyncio.sleep(5)
             except Exception as e:
-                logging.error(f"🔴 Error in save worker: {e}")
-                
-        # Final save of any remaining posts
-        if posts_batch:
-            await self.disk_queue.put((posts_batch.copy(), None))
+                if self.running:
+                    logging.error(f"🔴 Unexpected error: {e}. Reconnecting in 5 seconds...")
+                    await asyncio.sleep(5)
 
     async def archive_posts(self):
-        """Archive posts from the Bluesky firehose with automatic reconnection."""
-        # Start both worker tasks
-        self.save_task = asyncio.create_task(self.save_worker())
+        """Start archiving posts with continuous WebSocket listening."""
+        # Start background tasks
+        self.websocket_task = asyncio.create_task(self.archive_websocket_listener())
+        self.handle_task = asyncio.create_task(self.handle_processor())
         self.disk_task = asyncio.create_task(self.disk_worker())
+
+        # Wait for background tasks to complete
+        await asyncio.gather(
+            self.websocket_task,
+            self.handle_task,
+            self.disk_task
+        )
+
+    async def cleanup(self):
+        """Clean up background tasks."""
+        self.running = False
+        if not hasattr(self, '_cleanup_started'):
+            self._cleanup_started = True
+        else:
+            return
+
+        logging.info("Shutting down... Saving remaining posts...")
         
-        while self.running:
+        # First, save any remaining posts in the queues
+        remaining_posts = 0
+        # Process any remaining raw posts
+        while not self.raw_queue.empty():
             try:
-                params = {
-                    "wantedCollections": ["app.bsky.feed.post"]
-                }
-                url = f"{self.uri}?{'&'.join(f'wantedCollections={c}' for c in params['wantedCollections'])}"
+                posts = self.raw_queue.get_nowait()
+                # Process all posts in parallel
+                tasks = []
+                for post in posts:
+                    if post['did'] not in self.handle_cache:
+                        tasks.append(self.get_handle_and_update(post))
+                    else:
+                        # If handle is in cache, send directly to processed queue
+                        post['handle'] = self.handle_cache[post['did']]
+                        tasks.append(self.processed_queue.put([post]))
                 
-                async with websockets.connect(url) as websocket:
-                    if self.debug:
-                        logging.debug("🟢 Connected to firehose")
-                    while self.running:
-                        try:
-                            message = await websocket.recv()
-                            data = json.loads(message)
-                            
-                            if not self.running:
-                                break
-                            
-                            if data["kind"] == "commit":
-                                commit = data["commit"]
-                                if commit["operation"] == "create":
-                                    handle = await self.get_handle(data['did'])
-                                    
-                                    post_record = {
-                                        'handle': handle,
-                                        'timestamp': datetime.now().isoformat(),
-                                        'record': commit['record'],
-                                        "rkey": commit['rkey']
-                                    }
-                                    
-                                    for key, value in data.items():
-                                        if key != "kind" and key != "commit":
-                                            post_record[key] = value
-                                    
-                                    # Stream post text if enabled
-                                    if self.stream and 'text' in commit['record']:
-                                        sys.stdout.write(f"🖊️: {commit['record']['text']}\n")
-                                        sys.stdout.flush()
-                                    
-                                    await self.post_queue.put(post_record)
-                                    if self.debug:
-                                        logging.debug(f"🟢 Archived post from {handle or data['did']}")
-                                    
-                        except websockets.exceptions.ConnectionClosed:
-                            logging.debug("🔴 Connection closed, attempting to reconnect...")
-                            break
-                            
-            except Exception as e:
-                if not self.running:
-                    break
-                logging.error(f"🔴 Error in connection: {e}")
-                print("Reconnecting in 5 seconds...")
-                await asyncio.sleep(5)
-        
-        # Wait for tasks to complete when stopping
-        if self.save_task and self.disk_task:
+                # Wait for all handle resolutions and queue updates to complete
+                if tasks:
+                    await asyncio.gather(*tasks)
+                self.raw_queue.task_done()
+            except asyncio.QueueEmpty:
+                break
+
+        # Save processed posts
+        while not self.processed_queue.empty():
             try:
-                await asyncio.wait_for(asyncio.gather(self.save_task, self.disk_task), timeout=5.0)
-            except asyncio.TimeoutError:
-                logging.warning("🔴 Timeout waiting for tasks to complete")
+                posts = self.processed_queue.get_nowait()
+                remaining_posts += len(posts)
+                await self.save_posts_async(posts)
+                self.processed_queue.task_done()
+            except asyncio.QueueEmpty:
+                break
+
+        if remaining_posts > 0:
+            logging.info(f"Saved {remaining_posts} remaining posts during shutdown")
+
+        tasks = []
+        for task in [self.websocket_task, self.disk_task, self.handle_task]:
+            if task and not task.done():
+                task.cancel()
+                tasks.append(task)
+        
+        if tasks:
+            try:
+                # Wait for tasks to complete with a timeout
+                await asyncio.wait(tasks, timeout=5.0)
+            except asyncio.CancelledError:
+                pass  # Ignore cancellation during cleanup
+            except Exception as e:
+                logging.error(f"Error during cleanup: {e}")
 
     def stop(self):
         """Stop the archiver gracefully."""
-        self.running = False
-
-    async def stream_posts(self):
-        """Stream posts as they arrive from the firehose.
-        
-        Yields:
-            dict: Post record containing handle, timestamp, record data and metadata
-        """
-        self.running = True
-        
-        while self.running:
+        self.running = False  # Ensure running is set to False first
+        # Create cleanup task with a timeout
+        async def cleanup_with_timeout():
             try:
-                params = {
-                    "wantedCollections": ["app.bsky.feed.post"]
-                }
-                url = f"{self.uri}?{'&'.join(f'wantedCollections={c}' for c in params['wantedCollections'])}"
-                
-                async with websockets.connect(url) as websocket:
-                    if self.debug:
-                        logging.debug("🟢 Connected to firehose")
-                    while self.running:
-                        try:
-                            message = await websocket.recv()
-                            data = json.loads(message)
-                            
-                            if not self.running:
-                                break
-                            
-                            if data["kind"] == "commit":
-                                commit = data["commit"]
-                                if commit["operation"] == "create":
-                                    handle = await self.get_handle(data['did'])
-                                    
-                                    post_record = {
-                                        'handle': handle,
-                                        'timestamp': datetime.now().isoformat(),
-                                        'record': commit['record'],
-                                        "rkey": commit['rkey']
-                                    }
-                                    
-                                    for key, value in data.items():
-                                        if key != "kind" and key != "commit":
-                                            post_record[key] = value
-                                    
-                                    yield post_record
-                                    
-                        except websockets.exceptions.ConnectionClosed:
-                            logging.debug("🔴 Connection closed, attempting to reconnect...")
-                            break
-                            
+                await asyncio.wait_for(self.cleanup(), timeout=5.0)
+            except asyncio.TimeoutError:
+                logging.warning("Cleanup timed out after 5 seconds")
+                # Force exit after timeout
+                import sys
+                sys.exit(0)
             except Exception as e:
-                if not self.running:
-                    break
-                logging.error(f"🔴 Error in connection: {e}")
-                await asyncio.sleep(5)
+                logging.error(f"Error during cleanup: {e}")
+                sys.exit(1)
+        
+        # Run cleanup and wait for it
+        asyncio.create_task(cleanup_with_timeout())
+        
+        # Only show stats once during cleanup
+        if self.measure_rate and self.start_time and not hasattr(self, '_cleanup_started'):
+            elapsed_minutes = (datetime.now() - self.start_time).total_seconds() / 60
+            if elapsed_minutes > 0:
+                rate = self.post_count / elapsed_minutes
+                estimated_daily = rate * 60 * 24
+                logging.info(f"Final rate: {rate:.1f} posts/minute")
+                logging.info(f"Estimated daily volume: {int(estimated_daily):,} posts/day")
+                logging.info(f"Total posts collected: {self.post_count:,} (saved: {self.posts_saved:,})")
+                if self.post_count != self.posts_saved:
+                    logging.warning(f"⚠️ Discrepancy: {self.post_count - self.posts_saved:,} posts were collected but not saved")
+

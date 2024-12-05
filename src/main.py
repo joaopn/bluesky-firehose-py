@@ -10,7 +10,9 @@ async def run_archiver(args):
         username=args.username, 
         password=args.password, 
         debug=args.debug,
-        stream=args.stream
+        stream=args.stream,
+        measure_rate=args.measure_rate,
+        get_handles=args.get_handles
     )
     
     def handle_shutdown(sig, frame):
@@ -34,6 +36,10 @@ def main():
     parser.add_argument('--password', help='Bluesky password')
     parser.add_argument('--debug', action='store_true', help='Enable debug output')
     parser.add_argument('--stream', action='store_true', help='Stream post text to stdout')
+    parser.add_argument("--measure-rate", action="store_true", 
+                       help="Track and display posts per minute rate")
+    parser.add_argument("--get-handles", action="store_true",
+                       help="Resolve handles while archiving (significantly slower due to rate limits)")
     
     args = parser.parse_args()
     
