@@ -12,7 +12,7 @@ async def test_stream_posts():
     print("\nTesting stream_posts functionality...")
     archiver = BlueskyArchiver()
     posts_received = 0
-    required_fields = {'handle', 'timestamp', 'record', 'rkey'}
+    required_fields = {'handle', 'time_us', 'record', 'rkey'}
     
     try:
         async for post in archiver.stream_posts():
@@ -33,6 +33,10 @@ async def test_stream_posts():
             if 'createdAt' not in post['record']:
                 raise AssertionError("Post record should contain createdAt")
             
+            # Verify handle structure
+            if 'handle' not in post:
+                raise AssertionError("Post should contain handle")
+            
             posts_received += 1
             print(f"✓ Received post {posts_received}: {post['record']['text'][:100]}...")
             
@@ -41,6 +45,7 @@ async def test_stream_posts():
                 break
                 
     except Exception as e:
+        print(f"\n✗ Test failed: {str(e)}")
         archiver.stop()
         raise e
     
