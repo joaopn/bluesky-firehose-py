@@ -19,7 +19,8 @@ class BlueskyArchiver:
         stream: bool = False, 
         measure_rate: bool = False,
         get_handles: bool = False,
-        cursor: Optional[int] = None  # Unix microseconds timestamp
+        cursor: Optional[int] = None,  # Unix microseconds timestamp
+        archive_all: bool = False  # Flag to archive all records
     ):
         """Initialize the Bluesky Archiver."""
         # Configure logging
@@ -62,6 +63,8 @@ class BlueskyArchiver:
             format='%(asctime)s - %(levelname)s - %(message)s'
         )
 
+        self.archive_all = archive_all
+
     async def get_handle(self, did: str) -> Optional[str]:
         """Retrieve handle for a given DID."""
         if did in self.handle_cache:
@@ -85,9 +88,35 @@ class BlueskyArchiver:
             self.resolving_dids.remove(did)
 
     async def save_posts_async(self, posts: List[dict]):
-        """Asynchronously save posts to JSONL files, organized by hour."""
         if self.measure_rate and self.start_time is None:
             self.start_time = datetime.now()
+
+        """Asynchronously save posts to JSONL files, organized by hour."""
+        if self.archive_all:
+            # Save raw records in data_everything directory
+            for record in posts:
+                post_time = datetime.fromtimestamp(record["time_us"] / 1_000_000)
+                date_dir = post_time.strftime('%Y-%m/%d')
+                hour_filename = post_time.strftime('records_%Y%m%d_%H.jsonl')
+                full_path = f"data_everything/{date_dir}/{hour_filename}"
+                
+                os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                async with aiofiles.open(full_path, 'a', encoding='utf-8') as f:
+                    await f.write(json.dumps(record, ensure_ascii=False) + '\n')
+            
+            self.posts_saved += len(posts)
+            
+            if self.measure_rate:
+                self.post_count += len(posts)
+                now = datetime.now()
+                if (now - self.last_rate_check).total_seconds() >= 10 if hasattr(self, 'last_rate_check') else True:
+                    elapsed_minutes = (now - self.start_time).total_seconds() / 60
+                    rate = self.post_count / elapsed_minutes
+                    estimated_daily = rate * 60 * 24
+                    logging.info(f"Current rate: {rate:.1f} records/minute (est. {int(estimated_daily):,} records/day)")
+                    self.last_rate_check = now
+            return
+
 
         posts_by_hour = {}
         for post in posts:
@@ -165,13 +194,15 @@ class BlueskyArchiver:
         """Continuously listen to the WebSocket and enqueue posts."""
         while self.running:
             try:
-                params = {"wantedCollections": ["app.bsky.feed.post"]}
+                params = {}  # No filters when archive_all is True
                 if self.cursor:
                     if self.debug:
                         logging.debug(f"Starting playback from cursor: {self.cursor}")
-                    params["cursor"] = int(self.cursor)
+                    params["cursor"] = str(self.cursor)
 
-                url = f"{self.uri}?{'&'.join(f'wantedCollections={c}' for c in params['wantedCollections'])}&cursor={params['cursor']}" 
+                url = f"{self.uri}"
+                if params:
+                    url += f"?{'&'.join(f'{k}={v}' for k, v in params.items())}"
 
                 async with websockets.connect(url) as archive_websocket:
                     if self.debug:
@@ -180,28 +211,32 @@ class BlueskyArchiver:
                         if not self.running:
                             break
                         data = json.loads(message)
-                        if data.get("kind") != "commit":
-                            continue
-                        commit = data.get("commit", {})
-                        if commit.get("operation") != "create":
-                            continue
+                        if self.archive_all:
+                            # Store the complete record as-is
+                            await self.raw_queue.put([data])
+                        else:
+                            # Original post processing logic
+                            if data.get("kind") != "commit":
+                                continue
+                            commit = data.get("commit", {})
+                            if commit.get("operation") != "create":
+                                continue
 
-                        did = data.get('did')
-                        post_record = {
-                            'handle': None,  # Handle will be resolved by handle_processor
-                            'record': commit.get('record'),
-                            "rkey": commit.get('rkey'),
-                            'did': did,
-                            'time_us': data.get('time_us')
-                        }
+                            did = data.get('did')
+                            post_record = {
+                                'handle': None,
+                                'record': commit.get('record'),
+                                "rkey": commit.get('rkey'),
+                                'did': did,
+                                'time_us': data.get('time_us')
+                            }
+                            await self.raw_queue.put([post_record])
 
                         self.cursor = data.get('time_us')
 
                         if self.stream and 'text' in commit.get('record', {}):
                             sys.stdout.write(f"🖊️: {commit['record']['text']}\n")
                             sys.stdout.flush()
-
-                        await self.raw_queue.put([post_record])
 
             except asyncio.CancelledError:
                 break  # Exit cleanly on cancellation

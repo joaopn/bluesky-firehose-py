@@ -13,7 +13,8 @@ async def run_archiver(args):
         stream=args.stream,
         measure_rate=args.measure_rate,
         get_handles=args.get_handles,
-        cursor=args.cursor
+        cursor=args.cursor,
+        archive_all=args.archive_all
     )
     
     def handle_shutdown(sig, frame):
@@ -43,6 +44,8 @@ def main():
                        help="Resolve handles while archiving (significantly slower due to rate limits)")
     parser.add_argument("--cursor", type=int,
                        help="Unix microseconds timestamp to start playback from")
+    parser.add_argument("--archive-all", action="store_true",
+                       help="Archive all records in their original format (not just posts)")
     
     args = parser.parse_args()
     

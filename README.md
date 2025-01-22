@@ -61,6 +61,7 @@ Options:
   --measure-rate Track and display posts per minute rate
   --get-handles  Resolve handles while archiving (not recommended)
   --cursor      Unix microseconds timestamp to start playback from
+  --archive-all Archive all records in their original format (not just posts)
 ```
 
 Note: Authentication (username/password) is currently implemented but not required for basic operation. Future versions will use authentication to fetch additional user and post metadata. In addition, handle resolution is disabled by default, because it slows down the archiving process considerably because of the rate limiting. Getting the handles through the DID after collection is recommended.
@@ -180,3 +181,33 @@ Notes about playback:
 - The cursor should be a Unix timestamp in microseconds
 - Playback will start from the specified time and continue to real-time
 - You can find the timestamp in the saved posts' `time_us` field
+
+### Complete Record Archiving
+
+By default, the archiver only saves post records. To archive all record types (posts, likes, follows, etc.) in their original format:
+
+```bash
+python src/main.py --archive-all
+```
+
+This will:
+- Save all records without filtering by collection
+- Preserve the original JSON structure from the firehose
+- Store files in the `data_everything` directory
+- Include all record types (posts, likes, follows, profiles, etc.)
+
+The records are saved in JSONL format with the original structure:
+```json
+{
+    "did": "did:plc:abcd...",
+    "time_us": 1234567890,
+    "kind": "commit",
+    "commit": {
+        "rev": "...",
+        "operation": "create",
+        "collection": "app.bsky.feed.post",
+        "rkey": "...",
+        "record": { ... }
+    }
+}
+```
