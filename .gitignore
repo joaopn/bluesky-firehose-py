@@ -42,3 +42,6 @@ config.json
 
 # .ipynb used for experimentation
 *.ipynb
+
+.venv/
+    

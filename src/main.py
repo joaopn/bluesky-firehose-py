@@ -12,7 +12,8 @@ async def run_archiver(args):
         debug=args.debug,
         stream=args.stream,
         measure_rate=args.measure_rate,
-        get_handles=args.get_handles
+        get_handles=args.get_handles,
+        cursor=args.cursor
     )
     
     def handle_shutdown(sig, frame):
@@ -40,6 +41,8 @@ def main():
                        help="Track and display posts per minute rate")
     parser.add_argument("--get-handles", action="store_true",
                        help="Resolve handles while archiving (significantly slower due to rate limits)")
+    parser.add_argument("--cursor", type=int,
+                       help="Unix microseconds timestamp to start playback from")
     
     args = parser.parse_args()
     

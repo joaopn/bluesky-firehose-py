@@ -18,7 +18,8 @@ class BlueskyArchiver:
         debug: bool = False, 
         stream: bool = False, 
         measure_rate: bool = False,
-        get_handles: bool = False
+        get_handles: bool = False,
+        cursor: Optional[int] = None  # Unix microseconds timestamp
     ):
         """Initialize the Bluesky Archiver."""
         # Configure logging
@@ -30,6 +31,7 @@ class BlueskyArchiver:
         self.stream = stream
         self.measure_rate = measure_rate
         self.get_handles = get_handles
+        self.cursor = cursor
         self.post_count = 0
         self.posts_saved = 0
         self.start_time = None
@@ -164,7 +166,13 @@ class BlueskyArchiver:
         while self.running:
             try:
                 params = {"wantedCollections": ["app.bsky.feed.post"]}
-                url = f"{self.uri}?{'&'.join(f'wantedCollections={c}' for c in params['wantedCollections'])}"
+                if self.cursor:
+                    if self.debug:
+                        logging.debug(f"Starting playback from cursor: {self.cursor}")
+                    params["cursor"] = int(self.cursor)
+
+                url = f"{self.uri}?{'&'.join(f'wantedCollections={c}' for c in params['wantedCollections'])}&cursor={params['cursor']}" 
+
                 async with websockets.connect(url) as archive_websocket:
                     if self.debug:
                         logging.debug("🟢 Connected to firehose for archiving")
@@ -186,6 +194,8 @@ class BlueskyArchiver:
                             'did': did,
                             'time_us': data.get('time_us')
                         }
+
+                        self.cursor = data.get('time_us')
 
                         if self.stream and 'text' in commit.get('record', {}):
                             sys.stdout.write(f"🖊️: {commit['record']['text']}\n")

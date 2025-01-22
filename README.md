@@ -60,6 +60,7 @@ Options:
   --stream      Stream post text to stdout in real-time
   --measure-rate Track and display posts per minute rate
   --get-handles  Resolve handles while archiving (not recommended)
+  --cursor      Unix microseconds timestamp to start playback from
 ```
 
 Note: Authentication (username/password) is currently implemented but not required for basic operation. Future versions will use authentication to fetch additional user and post metadata. In addition, handle resolution is disabled by default, because it slows down the archiving process considerably because of the rate limiting. Getting the handles through the DID after collection is recommended.
@@ -159,9 +160,23 @@ Each JSONL file contains one post per line in JSON format with the following str
 │   └── archiver.py       # Core archiving logic
 ├── data/                 # Archived posts storage
 ├── requirements.txt      # Project dependencies
-���── README.md            # This file
+└── README.md            # This file
 ```
 
 ## License
 
 MIT License 
+
+### Playback Feature
+
+The archiver supports playback from a specific point in time using the Jetstream cursor functionality. To use this feature:
+
+```bash
+# Start archiving from a specific timestamp (Unix microseconds)
+python src/main.py --cursor 1725911162329308
+```
+
+Notes about playback:
+- The cursor should be a Unix timestamp in microseconds
+- Playback will start from the specified time and continue to real-time
+- You can find the timestamp in the saved posts' `time_us` field
