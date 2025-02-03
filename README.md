@@ -15,6 +15,7 @@ A Python library for collecting and archiving posts from the Bluesky social netw
 - Efficient batch processing and disk operations
 - Debug mode for detailed logging
 - Optional handle resolution (disabled by default)
+- Playback support from specific timestamps
 
 ## Installation
 
@@ -39,37 +40,9 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-5. For development/testing:
-```bash
-pip install -r requirements-dev.txt
-```
-
 ## Usage
 
-### As a Command Line Tool
-
-Basic usage:
-```bash
-python src/main.py
-```
-
-Available command line options:
-```bash
-python src/main.py [options]
-
-Options:
-  --username         Bluesky username (optional)
-  --password         Bluesky password (optional)
-  --debug           Enable debug output
-  --stream          Stream post text to stdout in real-time
-  --measure-rate    Track and display posts per minute rate
-  --get-handles     Resolve handles while archiving (not recommended)
-  --cursor          Unix microseconds timestamp to start playback from
-  --archive-all     Archive all records in their original format
-  --archive-non-posts Archive everything except posts
-```
-
-### Archiving Modes
+### Command Line Interface
 
 The archiver supports three distinct modes of operation:
 
@@ -101,66 +74,49 @@ python src/main.py --archive-non-posts
 
 Note: The `--archive-all` and `--archive-non-posts` modes cannot be used simultaneously.
 
-### As a Library
+#### Additional Options
 
-You can use the archiver in two ways:
+```bash
+python src/main.py [options]
 
-1. Archive posts to disk:
-```python
-from archiver import BlueskyArchiver
-import asyncio
-
-async def main():
-    archiver = BlueskyArchiver(debug=True, stream=True)
-    await archiver.archive_posts()  # This will save posts to disk
-
-asyncio.run(main())
+Options:
+  --username         Bluesky username (optional)
+  --password         Bluesky password (optional)
+  --debug           Enable debug output
+  --stream          Stream post text to stdout in real-time
+  --measure-rate    Track and display posts per minute rate
+  --get-handles     Resolve handles while archiving (not recommended)
+  --cursor          Unix microseconds timestamp to start playback from
 ```
 
-2. Stream posts in your code:
+### Library Usage
+
+You can use the archiver in your Python code:
+
 ```python
 from archiver import BlueskyArchiver
 import asyncio
 
 async def main():
-    archiver = BlueskyArchiver()
+    # Initialize with desired options
+    archiver = BlueskyArchiver(
+        debug=True,           # Enable debug logging
+        stream=True,          # Stream posts to stdout
+        measure_rate=True,    # Show collection rate
+        archive_all=False,    # Default: posts only
+        get_handles=False     # Don't resolve handles
+    )
     
-    async for post in archiver.stream_posts():
-        # Process each post as it arrives
-        print(f"New post from @{post['handle']}: {post['record']['text']}")
-        
-        # Example: Filter posts containing specific text
-        if "python" in post['record']['text'].lower():
-            # Do something with Python-related posts
-            process_python_post(post)
+    try:
+        # Start archiving
+        await archiver.archive_posts()
+    finally:
+        # Ensure clean shutdown
+        archiver.stop()
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
-
-3. **Run Archiving and Streaming Concurrently**:
-```python
-from archiver import BlueskyArchiver
-import asyncio
-
-async def main():
-    archiver = BlueskyArchiver(debug=True, stream=True, measure_rate=True)
-    
-    async for post in archiver.run_stream():
-        # Process each post as it arrives
-        print(f"New post from @{post['handle']}: {post['record']['text']}")
-
-        # Example: Additional processing
-        # process_post(post)
-
-asyncio.run(main())
-```
-
-### Example Use Cases:
-- Real-time content analysis
-- Custom filtering and processing
-- Integration with other services
-- Building real-time dashboards
-- Research and data collection
 
 ## Data Storage
 
@@ -216,6 +172,16 @@ data_non_posts/          # Non-posts mode
 }
 ```
 
+### Playback Support
+
+You can start archiving from a specific point in time using the cursor functionality:
+
+```bash
+python src/main.py --cursor 1725911162329308
+```
+
+The cursor should be a Unix timestamp in microseconds. Playback will start from the specified time and continue to real-time. You can find timestamps in the saved records' `time_us` field.
+
 ## Project Structure
 
 ```
@@ -229,48 +195,4 @@ data_non_posts/          # Non-posts mode
 
 ## License
 
-MIT License 
-
-### Playback Feature
-
-The archiver supports playback from a specific point in time using the Jetstream cursor functionality. To use this feature:
-
-```bash
-# Start archiving from a specific timestamp (Unix microseconds)
-python src/main.py --cursor 1725911162329308
-```
-
-Notes about playback:
-- The cursor should be a Unix timestamp in microseconds
-- Playback will start from the specified time and continue to real-time
-- You can find the timestamp in the saved posts' `time_us` field
-
-### Complete Record Archiving
-
-By default, the archiver only saves post records. To archive all record types (posts, likes, follows, etc.) in their original format:
-
-```bash
-python src/main.py --archive-all
-```
-
-This will:
-- Save all records without filtering by collection
-- Preserve the original JSON structure from the firehose
-- Store files in the `data_everything` directory
-- Include all record types (posts, likes, follows, profiles, etc.)
-
-The records are saved in JSONL format with the original structure:
-```json
-{
-    "did": "did:plc:abcd...",
-    "time_us": 1234567890,
-    "kind": "commit",
-    "commit": {
-        "rev": "...",
-        "operation": "create",
-        "collection": "app.bsky.feed.post",
-        "rkey": "...",
-        "record": { ... }
-    }
-}
-```
+MIT License
