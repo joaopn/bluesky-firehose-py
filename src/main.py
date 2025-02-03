@@ -14,7 +14,8 @@ async def run_archiver(args):
         measure_rate=args.measure_rate,
         get_handles=args.get_handles,
         cursor=args.cursor,
-        archive_all=args.archive_all
+        archive_all=args.archive_all,
+        archive_non_posts=args.archive_non_posts
     )
     
     def handle_shutdown(sig, frame):
@@ -46,6 +47,8 @@ def main():
                        help="Unix microseconds timestamp to start playback from")
     parser.add_argument("--archive-all", action="store_true",
                        help="Archive all records in their original format (not just posts)")
+    parser.add_argument("--archive-non-posts", action="store_true",
+                       help="Archive everything except posts")
     
     args = parser.parse_args()
     

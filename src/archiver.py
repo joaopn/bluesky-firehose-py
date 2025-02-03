@@ -20,13 +20,17 @@ class BlueskyArchiver:
         measure_rate: bool = False,
         get_handles: bool = False,
         cursor: Optional[int] = None,  # Unix microseconds timestamp
-        archive_all: bool = False  # Flag to archive all records
+        archive_all: bool = False,  # Flag to archive all records
+        archive_non_posts: bool = False  # Flag to archive everything except posts
     ):
         """Initialize the Bluesky Archiver."""
         # Configure logging
         logging.getLogger('websockets').setLevel(logging.WARNING)
         logging.getLogger('urllib3').setLevel(logging.WARNING)
         logging.getLogger('httpx').setLevel(logging.WARNING)
+
+        if archive_all and archive_non_posts:
+            raise ValueError("Cannot use both archive_all and archive_non_posts modes simultaneously")
 
         self.debug = debug
         self.stream = stream
@@ -64,6 +68,7 @@ class BlueskyArchiver:
         )
 
         self.archive_all = archive_all
+        self.archive_non_posts = archive_non_posts
 
     async def get_handle(self, did: str) -> Optional[str]:
         """Retrieve handle for a given DID."""
@@ -92,13 +97,20 @@ class BlueskyArchiver:
             self.start_time = datetime.now()
 
         """Asynchronously save posts to JSONL files, organized by hour."""
-        if self.archive_all:
+        if self.archive_all or self.archive_non_posts:
             # Save raw records in data_everything directory
             for record in posts:
                 post_time = datetime.fromtimestamp(record["time_us"] / 1_000_000)
                 date_dir = post_time.strftime('%Y-%m/%d')
                 hour_filename = post_time.strftime('records_%Y%m%d_%H.jsonl')
-                full_path = f"data_everything/{date_dir}/{hour_filename}"
+                
+                # Determine the output directory based on mode
+                if self.archive_all:
+                    base_dir = "data_everything"
+                else:  # archive_non_posts
+                    base_dir = "data_non_posts"
+                
+                full_path = f"{base_dir}/{date_dir}/{hour_filename}"
                 
                 os.makedirs(os.path.dirname(full_path), exist_ok=True)
                 async with aiofiles.open(full_path, 'a', encoding='utf-8') as f:
@@ -116,7 +128,6 @@ class BlueskyArchiver:
                     logging.info(f"Current rate: {rate:.1f} records/minute (est. {int(estimated_daily):,} records/day)")
                     self.last_rate_check = now
             return
-
 
         posts_by_hour = {}
         for post in posts:
@@ -211,30 +222,38 @@ class BlueskyArchiver:
                         if not self.running:
                             break
                         data = json.loads(message)
-                        if self.archive_all:
-                            # Store the complete record as-is
-                            await self.raw_queue.put([data])
-                        else:
-                            # Original post processing logic
-                            if data.get("kind") != "commit":
-                                continue
-                            commit = data.get("commit", {})
-                            if commit.get("operation") != "create":
-                                continue
+                        
+                        if data.get("kind") != "commit":
+                            continue
+                            
+                        commit = data.get("commit", {})
+                        if commit.get("operation") != "create":
+                            continue
 
-                            did = data.get('did')
-                            post_record = {
-                                'handle': None,
-                                'record': commit.get('record'),
-                                "rkey": commit.get('rkey'),
-                                'did': did,
-                                'time_us': data.get('time_us')
-                            }
-                            await self.raw_queue.put([post_record])
+                        # Check if it's a post
+                        is_post = commit.get("collection") == "app.bsky.feed.post"
+                        
+                        # Handle different archiving modes
+                        if self.archive_all:
+                            await self.raw_queue.put([data])
+                        elif self.archive_non_posts:
+                            if not is_post:
+                                await self.raw_queue.put([data])
+                        else:  # Posts only mode
+                            if is_post:
+                                did = data.get('did')
+                                post_record = {
+                                    'handle': None,
+                                    'record': commit.get('record'),
+                                    "rkey": commit.get('rkey'),
+                                    'did': did,
+                                    'time_us': data.get('time_us')
+                                }
+                                await self.raw_queue.put([post_record])
 
                         self.cursor = data.get('time_us')
 
-                        if self.stream and 'text' in commit.get('record', {}):
+                        if self.stream and is_post and 'text' in commit.get('record', {}):
                             sys.stdout.write(f"🖊️: {commit['record']['text']}\n")
                             sys.stdout.flush()
 

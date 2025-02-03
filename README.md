@@ -5,7 +5,11 @@ A Python library for collecting and archiving posts from the Bluesky social netw
 ## Features
 
 - Connects to Bluesky's Jetstream websocket API
-- Archives posts in JSONL format, organized by date and hour
+- Three archiving modes:
+  - Posts only (default)
+  - All records (posts, likes, follows, etc.)
+  - Non-posts only (everything except posts)
+- Archives data in JSONL format, organized by date and hour
 - Optional real-time post text streaming to stdout
 - Automatic reconnection on connection loss
 - Efficient batch processing and disk operations
@@ -54,17 +58,48 @@ Available command line options:
 python src/main.py [options]
 
 Options:
-  --username    Bluesky username (optional)
-  --password    Bluesky password (optional)
-  --debug       Enable debug output
-  --stream      Stream post text to stdout in real-time
-  --measure-rate Track and display posts per minute rate
-  --get-handles  Resolve handles while archiving (not recommended)
-  --cursor      Unix microseconds timestamp to start playback from
-  --archive-all Archive all records in their original format (not just posts)
+  --username         Bluesky username (optional)
+  --password         Bluesky password (optional)
+  --debug           Enable debug output
+  --stream          Stream post text to stdout in real-time
+  --measure-rate    Track and display posts per minute rate
+  --get-handles     Resolve handles while archiving (not recommended)
+  --cursor          Unix microseconds timestamp to start playback from
+  --archive-all     Archive all records in their original format
+  --archive-non-posts Archive everything except posts
 ```
 
-Note: Authentication (username/password) is currently implemented but not required for basic operation. Future versions will use authentication to fetch additional user and post metadata. In addition, handle resolution is disabled by default, because it slows down the archiving process considerably because of the rate limiting. Getting the handles through the DID after collection is recommended.
+### Archiving Modes
+
+The archiver supports three distinct modes of operation:
+
+1. **Posts Only** (default):
+```bash
+python src/main.py
+```
+- Archives only posts (`app.bsky.feed.post` records)
+- Saves to `data/` directory
+- Files named `posts_YYYYMMDD_HH.jsonl`
+
+2. **All Records**:
+```bash
+python src/main.py --archive-all
+```
+- Archives all record types (posts, likes, follows, etc.)
+- Saves to `data_everything/` directory
+- Files named `records_YYYYMMDD_HH.jsonl`
+- Preserves complete record structure
+
+3. **Non-Posts Only**:
+```bash
+python src/main.py --archive-non-posts
+```
+- Archives everything except posts
+- Saves to `data_non_posts/` directory
+- Files named `records_YYYYMMDD_HH.jsonl`
+- Useful for collecting only interactions and profile updates
+
+Note: The `--archive-all` and `--archive-non-posts` modes cannot be used simultaneously.
 
 ### As a Library
 
@@ -129,27 +164,55 @@ asyncio.run(main())
 
 ## Data Storage
 
-Posts are automatically saved in JSONL (JSON Lines) format, organized by date and hour:
+Records are saved in JSONL (JSON Lines) format, organized by date and hour in different directories based on the archiving mode:
 
 ```
-data/
+data/                      # Posts only mode (default)
   └── YYYY-MM/
       └── DD/
           └── posts_YYYYMMDD_HH.jsonl
+
+data_everything/          # Archive all mode
+  └── YYYY-MM/
+      └── DD/
+          └── records_YYYYMMDD_HH.jsonl
+
+data_non_posts/          # Non-posts mode
+  └── YYYY-MM/
+      └── DD/
+          └── records_YYYYMMDD_HH.jsonl
 ```
 
-Each JSONL file contains one post per line in JSON format with the following structure:
+### Record Format
+
+1. **Posts Only Mode** (default):
 ```json
 {
     "handle": "user.bsky.social",
-    "timestamp": "2024-03-15T01:23:45.678Z",
     "record": {
         "text": "Post content",
         "createdAt": "2024-03-15T01:23:45.678Z",
         ...
     },
     "rkey": "unique-record-key",
-    ...
+    "did": "did:plc:abcd...",
+    "time_us": 1234567890
+}
+```
+
+2. **Archive All & Non-Posts Modes**:
+```json
+{
+    "did": "did:plc:abcd...",
+    "time_us": 1234567890,
+    "kind": "commit",
+    "commit": {
+        "rev": "...",
+        "operation": "create",
+        "collection": "app.bsky.feed.like",  // or other collection types
+        "rkey": "...",
+        "record": { ... }
+    }
 }
 ```
 
